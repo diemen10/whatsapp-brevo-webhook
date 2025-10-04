@@ -1,6 +1,6 @@
 import axios from "axios";
 
-/** Lee el raw body del request (Twilio envía x-www-form-urlencoded) */
+// Read the raw request body (Twilio sends x-www-form-urlencoded)
 async function readRawBody(req) {
   return await new Promise((resolve, reject) => {
     let data = "";
@@ -10,43 +10,37 @@ async function readRawBody(req) {
   });
 }
 
-/** Convierte x-www-form-urlencoded → objeto JS */
+// Convert x-www-form-urlencoded into a plain JS object
 function parseFormUrlEncoded(str) {
   const params = new URLSearchParams(str);
   const obj = {};
-  for (const [k, v] of params.entries()) obj[k] = v;
+  for (const [key, value] of params.entries()) obj[key] = value;
   return obj;
 }
 
 export default async function handler(req, res) {
-  // Solo aceptar POST (Twilio enviará POST)
   if (req.method !== "POST") {
     res.status(405).send("Method Not Allowed");
     return;
   }
 
-  // 1) Leer y parsear el cuerpo del mensaje entrante
-  const raw = await readRawBody(req);
-  const body = parseFormUrlEncoded(raw);
+  const rawBody = await readRawBody(req);
+  const body = parseFormUrlEncoded(rawBody);
 
-  // 2) Extraer info relevante (From y Body)
   const fromRaw = body.From || "";
-  const from = fromRaw.replace("whatsapp:", ""); // Debe quedar +34..., +63..., etc. (E.164)
+  const from = fromRaw.replace(/^whatsapp:/i, "").trim();
   const text = (body.Body || "").trim();
 
-  // Logs de diagnóstico
-  console.log("📩 Twilio payload keys:", Object.keys(body || {}));
-  console.log("📩 From raw:", fromRaw, "Parsed number:", from);
-  console.log("📩 Message text length:", text.length);
-  console.log("🔐 BREVO_API_KEY present?", Boolean(process.env.BREVO_API_KEY));
+  console.log("[twilio] payload keys:", Object.keys(body || {}));
+  console.log("[twilio] from raw:", fromRaw, "parsed:", from);
+  console.log("[twilio] message length:", text.length);
+  console.log("[config] BREVO_API_KEY present?", Boolean(process.env.BREVO_API_KEY));
 
   if (!from || !from.startsWith("+")) {
-    console.error("❗ Número inválido (debe ser E.164 con +). Form completo:", body);
+    console.error("[warn] phone number is missing or not in E.164 format. Twilio payload:", body);
   }
 
-  // 3) Payload para Brevo — probamos primero con WHATSAPP (identificador en MAYÚSCULAS)
-  let payload = {
-    WHATSAPP: from,
+  const basePayload = {
     attributes: {
       SOURCE: "WhatsApp",
       FIRST_MSG: text,
@@ -55,51 +49,65 @@ export default async function handler(req, res) {
     updateEnabled: true,
   };
 
-  const listId = process.env.BREVO_LIST_ID;
-  if (listId) payload.listIds = [Number(listId)];
+  const listIdEnv = process.env.BREVO_LIST_ID;
+  if (listIdEnv) {
+    const parsedListId = Number(listIdEnv);
+    if (Number.isFinite(parsedListId)) {
+      basePayload.listIds = [parsedListId];
+    } else {
+      console.warn("[config] BREVO_LIST_ID is not numeric:", listIdEnv);
+    }
+  }
 
   const headers = {
     "api-key": process.env.BREVO_API_KEY || "",
     "Content-Type": "application/json",
   };
 
-  // 4) Llamada a Brevo con reintento automático usando SMS si falla WHATSAPP
-  try {
-    // Intento 1: usar WHATSAPP como identificador
-    let r = await axios.post("https://api.brevo.com/v3/contacts", payload, {
-      headers,
-      timeout: 10000,
-      validateStatus: () => true, // no lances excepción automática
-    });
-    console.log("📤 Brevo try WHATSAPP → status:", r.status);
+  if (!headers["api-key"]) {
+    console.error("[config] BREVO_API_KEY is empty. Skipping Brevo call.");
+  } else if (!from) {
+    console.error("[brevo] missing phone identifier. Skipping Brevo call.");
+  } else {
+    const identifierSequence = [
+      { key: "whatsapp", label: "WHATSAPP" },
+      { key: "sms", label: "SMS" },
+    ];
 
-    if (r.status >= 300) {
-      console.error("❌ Brevo (WHATSAPP) body:", r.data);
+    let brevoSucceeded = false;
 
-      // Intento 2: reintentar con SMS (MAYÚSCULAS)
-      payload = { ...payload };
-      delete payload.WHATSAPP;
-      payload.SMS = from;
+    for (const { key, label } of identifierSequence) {
+      const payload = { ...basePayload, [key]: from };
 
-      const r2 = await axios.post("https://api.brevo.com/v3/contacts", payload, {
-        headers,
-        timeout: 10000,
-        validateStatus: () => true,
-      });
-      console.log("📤 Brevo try SMS → status:", r2.status);
+      try {
+        const response = await axios.post(
+          "https://api.brevo.com/v3/contacts",
+          payload,
+          {
+            headers,
+            timeout: 10000,
+            validateStatus: () => true,
+          }
+        );
 
-      if (r2.status >= 300) {
-        console.error("❌ Brevo (SMS) body:", r2.data);
-      } else {
-        console.log("✅ Brevo OK with SMS:", r2.data);
+        console.log(`[brevo] try ${label} -> status`, response.status);
+
+        if (response.status < 300) {
+          console.log(`[brevo] success with ${label}:`, response.data);
+          brevoSucceeded = true;
+          break;
+        }
+
+        console.error(`[brevo] error with ${label}:`, response.data);
+      } catch (error) {
+        console.error(`[brevo] network error with ${label}:`, error.message);
       }
-    } else {
-      console.log("✅ Brevo OK with WHATSAPP:", r.data);
     }
-  } catch (e) {
-    console.error("❌ Brevo NETWORK error:", e.message);
+
+    if (!brevoSucceeded) {
+      console.error("[brevo] all attempts failed for:", from);
+    }
   }
 
-  // 5) Responder a Twilio
   res.status(200).send("OK");
 }
