@@ -40,20 +40,28 @@ export default async function handler(req, res) {
     console.error("[warn] phone number is missing or not in E.164 format. Twilio payload:", body);
   }
 
-  const basePayload = {
-    attributes: {
-      SOURCE: "WhatsApp",
-      FIRST_MSG: text,
-      WHATSAPP_OPTIN: true,
-    },
+  const contactAttributes = {
+    SOURCE: "WhatsApp",
+    FIRST_MSG: text,
+    WHATSAPP_OPTIN: true,
+  };
+
+  if (from) {
+    contactAttributes.SMS = from;
+  }
+
+  const payload = {
+    attributes: contactAttributes,
     updateEnabled: true,
   };
+
+  console.log("[brevo] payload attribute keys", Object.keys(payload.attributes));
 
   const listIdEnv = process.env.BREVO_LIST_ID;
   if (listIdEnv) {
     const parsedListId = Number(listIdEnv);
     if (Number.isFinite(parsedListId)) {
-      basePayload.listIds = [parsedListId];
+      payload.listIds = [parsedListId];
     } else {
       console.warn("[config] BREVO_LIST_ID is not numeric:", listIdEnv);
     }
@@ -68,44 +76,29 @@ export default async function handler(req, res) {
     console.error("[config] BREVO_API_KEY is empty. Skipping Brevo call.");
   } else if (!from) {
     console.error("[brevo] missing phone identifier. Skipping Brevo call.");
+  } else if (!payload.attributes.SMS) {
+    console.error("[brevo] payload is missing SMS attribute. Skipping Brevo call.");
   } else {
-    const identifierSequence = [
-      { key: "whatsapp", label: "WHATSAPP" },
-      { key: "sms", label: "SMS" },
-    ];
-
-    let brevoSucceeded = false;
-
-    for (const { key, label } of identifierSequence) {
-      const payload = { ...basePayload, [key]: from };
-
-      try {
-        const response = await axios.post(
-          "https://api.brevo.com/v3/contacts",
-          payload,
-          {
-            headers,
-            timeout: 10000,
-            validateStatus: () => true,
-          }
-        );
-
-        console.log(`[brevo] try ${label} -> status`, response.status);
-
-        if (response.status < 300) {
-          console.log(`[brevo] success with ${label}:`, response.data);
-          brevoSucceeded = true;
-          break;
+    try {
+      const response = await axios.post(
+        "https://api.brevo.com/v3/contacts",
+        payload,
+        {
+          headers,
+          timeout: 10000,
+          validateStatus: () => true,
         }
+      );
 
-        console.error(`[brevo] error with ${label}:`, response.data);
-      } catch (error) {
-        console.error(`[brevo] network error with ${label}:`, error.message);
+      console.log("[brevo] create/update status", response.status);
+
+      if (response.status < 300) {
+        console.log("[brevo] success", response.data);
+      } else {
+        console.error("[brevo] error", response.data);
       }
-    }
-
-    if (!brevoSucceeded) {
-      console.error("[brevo] all attempts failed for:", from);
+    } catch (error) {
+      console.error("[brevo] network error", error.message);
     }
   }
 
