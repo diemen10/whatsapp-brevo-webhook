@@ -37,7 +37,7 @@ export default async function handler(req, res) {
 
   // 3️⃣ Crear payload para Brevo
   const payload = {
-    sms: from,
+    SMS: from,
     attributes: {
       SOURCE: "WhatsApp",
       FIRST_MSG: text,
